@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
 using System.IO;
+using System.Security;
 using System.Security.Principal;
 using System.Windows.Forms;
 // ReSharper disable UnusedMember.Global
@@ -333,13 +334,14 @@ namespace Microsoft.Win32.TaskScheduler
 				: service.TargetServer;
 		}
 
-		internal static string InvokeCredentialDialog(string userName, IWin32Window owner)
+		internal static string InvokeCredentialDialog(string userName, IWin32Window owner, bool forcePreVistaStyle = false)
 		{
 			var dlg = new CredentialsDialog(Resources.TaskSchedulerName, Resources.CredentialPromptMessage, userName) {ValidatePassword = true};
+            dlg.ForcePreVistaStyle = forcePreVistaStyle;
 			return dlg.ShowDialog(owner) == DialogResult.OK ? dlg.Password : null;
 		}
 
-		internal static bool ValidateOneTriggerExpires(IEnumerable<Trigger> triggers)
+        internal static bool ValidateOneTriggerExpires(IEnumerable<Trigger> triggers)
 		{
 			foreach (var tr in triggers)
 				if (tr.EndBoundary != DateTime.MaxValue)
@@ -360,51 +362,69 @@ namespace Microsoft.Win32.TaskScheduler
 		/// </remarks>
 		private void okBtn_Click(object sender, EventArgs e)
 		{
-			if (TaskDefinition.Actions.Count == 0)
-			{
-				MessageBox.Show(Resources.TaskMustHaveActionsError, null, MessageBoxButtons.OK, MessageBoxIcon.Error);
-				return;
-			}
+            try
+            {
+                if (TaskDefinition.Actions.Count == 0)
+                {
+                    MessageBox.Show(Resources.TaskMustHaveActionsError, null, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
 
-			if (TaskDefinition.Settings.DeleteExpiredTaskAfter != TimeSpan.Zero && !ValidateOneTriggerExpires())
-			{
-				MessageBox.Show(Resources.Error_TaskDeleteMustHaveExpiringTrigger, null, MessageBoxButtons.OK, MessageBoxIcon.Error);
-				return;
-			}
+                if (TaskDefinition.Settings.DeleteExpiredTaskAfter != TimeSpan.Zero && !ValidateOneTriggerExpires())
+                {
+                    MessageBox.Show(Resources.Error_TaskDeleteMustHaveExpiringTrigger, null, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
 
-			if (TaskDefinition.LowestSupportedVersion > TaskDefinition.Settings.Compatibility)
-			{
-				MessageBox.Show(Resources.Error_TaskPropertiesIncompatibleSimple, null, MessageBoxButtons.OK, MessageBoxIcon.Error);
-				return;
-			}
+                if (TaskDefinition.LowestSupportedVersion > TaskDefinition.Settings.Compatibility)
+                {
+                    MessageBox.Show(Resources.Error_TaskPropertiesIncompatibleSimple, null, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
 
-			if (RegisterTaskOnAccept)
-				if (Task != null && !TaskDefinition.Principal.RequiresPassword())
-				{
-					Task.RegisterChanges();
-				}
-				else
-				{
-					string pwd = null;
-					var fld = TaskService.GetFolder(TaskFolder);
-					if (TaskDefinition.Principal.RequiresPassword())
-					{
-						pwd = InvokeCredentialDialog(TaskDefinition.Principal.Account, this);
-						if (pwd == null)
-						{
-							//throw new System.Security.Authentication.AuthenticationException(EditorProperties.Resources.UserAuthenticationError);
-							MessageBox.Show(Resources.Error_PasswordMustBeProvided, null, MessageBoxButtons.OK, MessageBoxIcon.Error);
-							return;
-						}
-					}
-					Task = fld.RegisterTaskDefinition(taskPropertiesControl1.TaskName, TaskDefinition, TaskCreation.CreateOrUpdate,
-						null, pwd, TaskDefinition.Principal.LogonType);
-				}
+                if (RegisterTaskOnAccept)
+                    if (Task != null && !TaskDefinition.Principal.RequiresPassword())
+                    {
+                        Task.RegisterChanges();
+                    }
+                    else
+                    {
+                        string pwd = null;
+                        var fld = TaskService.GetFolder(TaskFolder);
+                        if (TaskDefinition.Principal.RequiresPassword())
+                        {
+                            string accountName = Task.Definition.Principal.Account ?? Task.Definition.Principal.ToString();
+                            SecureString password = null;
+                            if (Credentials != null && Credentials.TryGetValue(accountName, out password))
+                                pwd = password.ToInsecureString();
+                            else
+                            {
+                                pwd = InvokeCredentialDialog(accountName, this, ForcePreVistaStyle);
+                                Credentials[accountName] = pwd.ToSecureString();
+                            }
+                            if (pwd == null)
+                            {
+                                //throw new System.Security.Authentication.AuthenticationException(EditorProperties.Resources.UserAuthenticationError);
+                                MessageBox.Show(Resources.Error_PasswordMustBeProvided, null, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                return;
+                            }
+                        }
+                        Task = fld.RegisterTaskDefinition(taskPropertiesControl1.TaskName, TaskDefinition, TaskCreation.CreateOrUpdate,
+                            null, pwd, TaskDefinition.Principal.LogonType);
+                    }
+            }
+            catch (Exception ex)
+            {
+                Error = ex;
+            }
 			DialogResult = DialogResult.OK;
 			Close();
 		}
+        public Exception Error {get; private set;}
+        public Dictionary<string, SecureString> Credentials { get; set; }
+        public bool ForcePreVistaStyle { get; set; }
 
-		private void ResetTitle()
+        private void ResetTitle()
 		{
 			var resources = new ComponentResourceManager(typeof(TaskEditDialog));
 			Text = resources.GetString("$this.Text");
